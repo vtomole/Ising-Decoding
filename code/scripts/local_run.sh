@@ -21,6 +21,8 @@ set -euo pipefail
 # Examples:
 #   bash code/scripts/local_run.sh
 #   WORKFLOW=inference bash code/scripts/local_run.sh
+#   MODEL_ID=4 PREDECODER_SAFETENSORS_CHECKPOINT=models/hf/ising_decoder_surface_code_1_accurate_r13_v1.0.86_fp16.safetensors \
+#     WORKFLOW=inference bash code/scripts/local_run.sh
 #   GPUS=4 bash code/scripts/local_run.sh
 #   CUDA_VISIBLE_DEVICES=1 bash code/scripts/local_run.sh        # use only GPU 1
 #
@@ -51,11 +53,13 @@ EXPERIMENT_NAME="${EXPERIMENT_NAME:-test1}"
 CONFIG_NAME="${CONFIG_NAME:-config_public}"   # conf/<name>.yaml (no extension)
 WORKFLOW="${WORKFLOW:-train}"                 # train | inference
 WORKFLOW="$(echo "${WORKFLOW}" | tr '[:upper:]' '[:lower:]')"
+MODEL_ID="${MODEL_ID:-}"                      # public model_id override; Accurate/R=13 uses 4
 GPUS="${GPUS:-}"                              # if empty, auto-detect
 FRESH_START="${FRESH_START:-0}"               # 1 => don't load checkpoint
 EXTRA_PARAMS="${EXTRA_PARAMS:-}"              # advanced hydra overrides (discouraged)
 TORCH_COMPILE="${TORCH_COMPILE:-}"            # 0/1 to disable/enable torch.compile
 TORCH_COMPILE_MODE="${TORCH_COMPILE_MODE:-}"  # optional: default | reduce-overhead | max-autotune
+MODEL_CHECKPOINT_FILE="${PREDECODER_MODEL_CHECKPOINT_FILE:-}"
 
 DISTANCE="${DISTANCE:-}"
 N_ROUNDS="${N_ROUNDS:-}"
@@ -85,10 +89,15 @@ else
   RESUME_FLAG="++load_checkpoint=True"
 fi
 
-# GPU-only runs: require a visible GPU and nvidia-smi.
-if ! command -v nvidia-smi >/dev/null 2>&1; then
-  echo "[local_run.sh] Error: GPU-only mode requires nvidia-smi on PATH." >&2
-  echo "[local_run.sh] Hint: run on a GPU host or pass CUDA_VISIBLE_DEVICES." >&2
+# Training is GPU-only. Inference can run on CPU, but expect it to be much slower.
+HAS_WORKING_NVIDIA_SMI=0
+if command -v nvidia-smi >/dev/null 2>&1 && nvidia-smi -L >/dev/null 2>&1; then
+  HAS_WORKING_NVIDIA_SMI=1
+fi
+
+if [ "${HAS_WORKING_NVIDIA_SMI}" -eq 0 ] && [ "${WORKFLOW}" != "inference" ]; then
+  echo "[local_run.sh] Error: ${WORKFLOW} requires a working CUDA GPU." >&2
+  echo "[local_run.sh] Hint: pretrained-model inference can run on CPU with WORKFLOW=inference." >&2
   exit 1
 fi
 
@@ -101,17 +110,19 @@ v=os.environ.get('CUDA_VISIBLE_DEVICES','').strip()
 print(len([x for x in v.split(',') if x.strip()]) or 1)
 PY
 )"
-  else
+  elif [ "${HAS_WORKING_NVIDIA_SMI}" -eq 1 ]; then
     GPUS="$(nvidia-smi --query-gpu=name --format=csv,noheader | wc -l | tr -d ' ')"
+  else
+    GPUS="1"
   fi
 fi
 
-if [ "${GPUS}" -le 0 ]; then
+if [ "${GPUS}" -le 0 ] && [ "${WORKFLOW}" != "inference" ]; then
   echo "[local_run.sh] Error: no GPUs detected. GPU-only mode requires CUDA." >&2
   exit 1
 fi
 
-if [ -z "${MASTER_PORT:-}" ]; then
+if [ "${GPUS}" -gt 1 ] && [ -z "${MASTER_PORT:-}" ]; then
   MASTER_PORT="$(python3 - <<'PY'
 import socket
 s=socket.socket()
@@ -134,6 +145,8 @@ mkdir -p "${LOG_DIR}" "${OUTPUT_DIR}" "${CHECKPOINT_DIR}"
 
 # Force Hydra run dir to writable OUTPUT_DIR (avoids read-only repo/outputs in containers)
 OVERRIDES="hydra.run.dir=${OUTPUT_DIR}"
+if [ -n "${MODEL_ID}" ]; then OVERRIDES+=" model_id=${MODEL_ID}"; fi
+if [ -n "${MODEL_CHECKPOINT_FILE}" ]; then OVERRIDES+=" +model_checkpoint_file=${MODEL_CHECKPOINT_FILE}"; fi
 if [ -n "${DISTANCE}" ]; then OVERRIDES+=" distance=${DISTANCE}"; fi
 if [ -n "${N_ROUNDS}" ]; then OVERRIDES+=" n_rounds=${N_ROUNDS}"; fi
 if [ -n "${EXTRA_PARAMS}" ]; then OVERRIDES+=" ${EXTRA_PARAMS}"; fi
@@ -204,17 +217,21 @@ if ! command -v "${PYTHON_BIN}" >/dev/null 2>&1; then
   fi
 fi
 
-# Ensure CUDA is usable before launching the workflow.
-if ! "${PYTHON_BIN}" - <<'PY'
+# Ensure PyTorch is usable before launching the workflow.
+if ! PREDECODER_WORKFLOW="${WORKFLOW}" "${PYTHON_BIN}" - <<'PY'
+import os
 import sys
 try:
     import torch
 except Exception as exc:
-    print(f"[local_run.sh] Error: PyTorch is required for GPU-only runs ({exc}).", file=sys.stderr)
+    print(f"[local_run.sh] Error: PyTorch is required for this workflow ({exc}).", file=sys.stderr)
     sys.exit(1)
-if not torch.cuda.is_available():
+workflow = os.environ.get("PREDECODER_WORKFLOW", "train").strip().lower()
+if workflow != "inference" and not torch.cuda.is_available():
     print("[local_run.sh] Error: torch.cuda.is_available() is false. GPU-only mode requires CUDA.", file=sys.stderr)
     sys.exit(1)
+if workflow == "inference" and not torch.cuda.is_available():
+    print("[local_run.sh] Warning: CUDA is unavailable; running inference on CPU. This may be slow.")
 PY
 then
   exit 1

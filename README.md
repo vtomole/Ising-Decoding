@@ -210,7 +210,17 @@ If you are not training locally, you can run inference using pre-trained models.
    are supported for training by the pipeline below; they are a training-time
    customization rather than a property of the shipped checkpoints.
 
-   Clones get the files via `git lfs pull`. Optionally, set `PREDECODER_MODEL_URL` to the LFS/raw URL to fetch files when not in the working tree (e.g. in a minimal checkout or CI).
+   Clones get the files via `git lfs pull`. If the Hugging Face CLI login
+   command is not available in your environment, download with a read token
+   directly instead:
+
+   ```bash
+   HF_TOKEN=hf_... bash code/scripts/download_hf_model.sh accurate
+   ```
+
+   The token must have read access, and you must accept the model terms in the
+   browser for the selected Hugging Face repo first. The script also accepts
+   `fast` for the R=9 model.
 
 3. Set:
 
@@ -221,6 +231,29 @@ If you are not training locally, you can run inference using pre-trained models.
 
    ```bash
    WORKFLOW=inference EXPERIMENT_NAME=predecoder_model_1 bash code/scripts/local_run.sh
+   ```
+
+   To run a downloaded checkpoint explicitly:
+
+   ```bash
+   MODEL_ID=4 \
+   PREDECODER_SAFETENSORS_CHECKPOINT=models/hf/ising_decoder_surface_code_1_accurate_r13_v1.0.86_fp16.safetensors \
+   WORKFLOW=inference \
+   bash code/scripts/local_run.sh
+   ```
+
+   CPU-only inference is supported, but the default evaluation is heavy. For a
+   quick smoke test on CPU, reduce the sample count:
+
+   ```bash
+   PREDECODER_INFERENCE_NUM_SAMPLES=128 \
+   PREDECODER_INFERENCE_LATENCY_SAMPLES=0 \
+   PREDECODER_INFERENCE_NUM_WORKERS=0 \
+   TORCH_COMPILE=0 \
+   MODEL_ID=4 \
+   PREDECODER_SAFETENSORS_CHECKPOINT=models/hf/ising_decoder_surface_code_1_accurate_r13_v1.0.86_fp16.safetensors \
+   WORKFLOW=inference \
+   bash code/scripts/local_run.sh
    ```
 
 Inference output is written to `outputs/<EXPERIMENT_NAME>/` with a full log in

@@ -64,6 +64,9 @@ logs/
 # Precomputed data
 /frames_data/
 
+# Locally downloaded Hugging Face model weights
+/models/hf/
+
 # Local dev artifacts
 /EXECUTIVE_SUMMARY.md
 /LATEST_COMMIT_EXPLANATION.md
