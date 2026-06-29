@@ -57,6 +57,11 @@ from enum import IntEnum
 from pathlib import Path
 from typing import Optional
 
+from evaluation.neural_decoder import (
+    load_neural_logical_decoder,
+    resolve_neural_decoder_checkpoint,
+)
+
 
 def _is_compiled(model: nn.Module) -> bool:
     """True if *model* is already wrapped by torch.compile (OptimizedModule)."""
@@ -69,6 +74,55 @@ def _is_compiled(model: nn.Module) -> bool:
 
 def _decode_batch(matcher, detectors, enable_correlated):
     return matcher.decode_batch(detectors, enable_correlations=enable_correlated)
+
+
+def _get_global_decoder_kind(cfg) -> str:
+    """Return the selected final logical decoder kind."""
+    raw = os.environ.get("PREDECODER_GLOBAL_DECODER", "").strip()
+    if not raw:
+        raw = str(getattr(getattr(cfg, "test", None), "global_decoder", "pymatching"))
+    kind = raw.strip().lower().replace("-", "_")
+    aliases = {
+        "pm": "pymatching",
+        "mwpm": "pymatching",
+        "matching": "pymatching",
+        "nn": "neural",
+        "ml": "neural",
+        "neural_network": "neural",
+    }
+    kind = aliases.get(kind, kind)
+    if kind not in ("pymatching", "neural"):
+        raise ValueError(
+            f"Unsupported global decoder {raw!r}. "
+            "Use PREDECODER_GLOBAL_DECODER=pymatching or neural."
+        )
+    return kind
+
+
+def _global_decoder_label(kind: str) -> str:
+    return {"pymatching": "PyMatching", "neural": "Neural network"}.get(kind, kind)
+
+
+def _get_neural_decoder_threshold(cfg) -> float:
+    raw = os.environ.get("PREDECODER_NEURAL_DECODER_THRESHOLD")
+    if raw is None or not raw.strip():
+        raw = getattr(getattr(cfg, "test", None), "neural_decoder_threshold", 0.5)
+    return float(raw)
+
+
+def _get_neural_decoder_batch_size(cfg) -> int:
+    raw = os.environ.get("PREDECODER_NEURAL_DECODER_BATCH_SIZE")
+    if raw is None or not raw.strip():
+        raw = getattr(getattr(cfg, "test", None), "neural_decoder_batch_size", 8192)
+    return max(int(raw), 1)
+
+
+def _decode_with_global_decoder(kind: str, matcher, neural_decoder, detectors):
+    if kind == "pymatching":
+        return matcher.decode_batch(detectors)
+    if neural_decoder is None:
+        raise RuntimeError("Neural global decoder was selected but not initialized.")
+    return neural_decoder.decode_batch(detectors)
 
 
 class OnnxWorkflow(IntEnum):
@@ -271,6 +325,60 @@ def _time_single_shot_latency_stim(
     for i in range(n_samples):
         t_start = time.perf_counter()
         _ = matcher.decode(np.asarray(residual_syndromes[i], dtype=np.uint8))
+        predecoder_times.append(time.perf_counter() - t_start)
+
+    baseline_mean_us_per_round = float(np.mean(baseline_times) / n_rounds * 1e6)
+    predecoder_mean_us_per_round = float(np.mean(predecoder_times) / n_rounds * 1e6)
+    return (baseline_mean_us_per_round, predecoder_mean_us_per_round)
+
+
+def _time_single_shot_latency_global_decoder(
+    decoder_kind: str,
+    matcher,
+    neural_decoder,
+    baseline_syndromes: np.ndarray,
+    residual_syndromes: np.ndarray,
+    *,
+    n_rounds: int,
+    warmup_iterations: int = 50,
+) -> tuple[float, float]:
+    if decoder_kind == "pymatching":
+        return _time_single_shot_latency_stim(
+            matcher=matcher,
+            baseline_syndromes=baseline_syndromes,
+            residual_syndromes=residual_syndromes,
+            n_rounds=n_rounds,
+            warmup_iterations=warmup_iterations,
+        )
+
+    n_rounds = max(int(n_rounds), 1)
+    if baseline_syndromes is None or residual_syndromes is None:
+        return (float("nan"), float("nan"))
+    n_samples = int(min(len(baseline_syndromes), len(residual_syndromes)))
+    if n_samples <= 0:
+        return (float("nan"), float("nan"))
+
+    try:
+        if torch.cuda.is_available():
+            torch.cuda.synchronize()
+    except Exception:
+        pass
+
+    warmup_n = min(int(warmup_iterations), n_samples)
+    for i in range(warmup_n):
+        _ = neural_decoder.decode_batch(np.asarray(baseline_syndromes[i:i + 1], dtype=np.uint8))
+        _ = neural_decoder.decode_batch(np.asarray(residual_syndromes[i:i + 1], dtype=np.uint8))
+
+    baseline_times = []
+    for i in range(n_samples):
+        t_start = time.perf_counter()
+        _ = neural_decoder.decode_batch(np.asarray(baseline_syndromes[i:i + 1], dtype=np.uint8))
+        baseline_times.append(time.perf_counter() - t_start)
+
+    predecoder_times = []
+    for i in range(n_samples):
+        t_start = time.perf_counter()
+        _ = neural_decoder.decode_batch(np.asarray(residual_syndromes[i:i + 1], dtype=np.uint8))
         predecoder_times.append(time.perf_counter() - t_start)
 
     baseline_mean_us_per_round = float(np.mean(baseline_times) / n_rounds * 1e6)
@@ -789,8 +897,70 @@ class PreDecoderMemoryEvalModule(nn.Module):
         return out
 
 
+def _make_ler_result_dict(
+    *,
+    cfg,
+    num_errors: int,
+    num_shots: int,
+    baseline_predictions: int,
+    baseline_us_per_round: float,
+    predecoder_us_per_round: float,
+) -> dict:
+    decoder_kind = _get_global_decoder_kind(cfg)
+    decoder_label = _global_decoder_label(decoder_kind)
+
+    # Because each element is either 1 or 0, the sum_i of x_i == the sum_i of x_i^2.
+    var = (num_errors - num_errors * num_errors / float(num_shots)) / num_shots
+    stddev = np.sqrt(var)
+    baseline_var = (
+        baseline_predictions - baseline_predictions * baseline_predictions / float(num_shots)
+    ) / num_shots
+    baseline_stddev = np.sqrt(baseline_var)
+
+    return {
+        "num shots":
+            int(num_shots),
+        "logical errors":
+            int(num_errors),
+        "baseline decoder errors":
+            int(baseline_predictions),
+        "baseline decoder":
+            decoder_kind,
+        "baseline decoder label":
+            decoder_label,
+        "global decoder":
+            decoder_kind,
+        "global decoder label":
+            decoder_label,
+        "logical error ratio (mean)":
+            float(num_errors / num_shots),
+        "logical error ratio (standard error)":
+            float(stddev / np.sqrt(num_shots)),
+        "logical error ratio (baseline mean)":
+            float(baseline_predictions / float(num_shots)),
+        "logical error ratio (baseline standard error)":
+            float(baseline_stddev / np.sqrt(num_shots)),
+        "decoder latency (baseline µs/round)":
+            float(baseline_us_per_round),
+        "decoder latency (after predecoder µs/round)":
+            float(predecoder_us_per_round),
+        # Backward-compatible key names. For PREDECODER_GLOBAL_DECODER=neural these
+        # are the selected baseline decoder's values, not PyMatching's values.
+        "pymatch flips":
+            int(baseline_predictions),
+        "logical error ratio (pymatch mean)":
+            float(baseline_predictions / float(num_shots)),
+        "logical error ratio (pymatch standard error)":
+            float(baseline_stddev / np.sqrt(num_shots)),
+        "pymatch latency (baseline µs/round)":
+            float(baseline_us_per_round),
+        "pymatch latency (after predecoder µs/round)":
+            float(predecoder_us_per_round),
+    }
+
+
 def count_logical_errors_with_errorbar(model, device, dist, cfg):
-    #logical_errors.item(), total_samples, num_pymatch_errors
+    #logical_errors.item(), total_samples, baseline decoder errors
     result = {}
 
     if cfg.test.meas_basis_test.lower() in ("both", "mixed"):
@@ -804,75 +974,43 @@ def count_logical_errors_with_errorbar(model, device, dist, cfg):
             verbose = bool(getattr(cfg.test, "verbose_inference", False)
                           ) or bool(getattr(cfg.test, "verbose", False))
             t0 = time.time()
-            num_errors, num_shots, pymatch_predictions, baseline_us_per_round, predecoder_us_per_round = run_inference_and_decode_pre_decoder_memory(
-                model, device, dist, cfg
-            )
+            (
+                num_errors,
+                num_shots,
+                baseline_predictions,
+                baseline_us_per_round,
+                predecoder_us_per_round,
+            ) = run_inference_and_decode_pre_decoder_memory(model, device, dist, cfg)
             tf = time.time()
             if verbose and dist.rank == 0:
                 print(f"Time taken for {cfg.test.meas_basis_test}: {tf - t0:.3f}s")
 
-            # Because each element is either 1 or 0, the sum_i of x_i == the sum_i of x_i^2.
-            var = (num_errors - num_errors * num_errors / float(num_shots)) / num_shots
-            stddev = np.sqrt(var)
-            pymatch_var = (
-                pymatch_predictions - pymatch_predictions * pymatch_predictions / float(num_shots)
-            ) / num_shots
-            pymatch_stddev = np.sqrt(pymatch_var)
-
-            result[cfg.test.meas_basis_test] = {
-                "num shots":
-                    int(num_shots),
-                "logical errors":
-                    int(num_errors),
-                "pymatch flips":
-                    int(pymatch_predictions),
-                "logical error ratio (mean)":
-                    float(num_errors / num_shots),
-                "logical error ratio (standard error)":
-                    float(stddev / np.sqrt(num_shots)),
-                "logical error ratio (pymatch mean)":
-                    float(pymatch_predictions / float(num_shots)),
-                "logical error ratio (pymatch standard error)":
-                    float(pymatch_stddev / np.sqrt(num_shots)),
-                "pymatch latency (baseline µs/round)":
-                    float(baseline_us_per_round),
-                "pymatch latency (after predecoder µs/round)":
-                    float(predecoder_us_per_round),
-            }
+            result[cfg.test.meas_basis_test] = _make_ler_result_dict(
+                cfg=cfg,
+                num_errors=num_errors,
+                num_shots=num_shots,
+                baseline_predictions=baseline_predictions,
+                baseline_us_per_round=baseline_us_per_round,
+                predecoder_us_per_round=predecoder_us_per_round,
+            )
         cfg.test.meas_basis_test = orig
     else:
-        num_errors, num_shots, pymatch_predictions, baseline_us_per_round, predecoder_us_per_round = run_inference_and_decode_pre_decoder_memory(
-            model, device, dist, cfg
+        (
+            num_errors,
+            num_shots,
+            baseline_predictions,
+            baseline_us_per_round,
+            predecoder_us_per_round,
+        ) = run_inference_and_decode_pre_decoder_memory(model, device, dist, cfg)
+
+        result[cfg.test.meas_basis_test] = _make_ler_result_dict(
+            cfg=cfg,
+            num_errors=num_errors,
+            num_shots=num_shots,
+            baseline_predictions=baseline_predictions,
+            baseline_us_per_round=baseline_us_per_round,
+            predecoder_us_per_round=predecoder_us_per_round,
         )
-
-        # Because each element is either 1 or 0, the sum_i of x_i == the sum_i of x_i^2.
-        var = (num_errors - num_errors * num_errors / float(num_shots)) / num_shots
-        stddev = np.sqrt(var)
-        pymatch_var = (
-            pymatch_predictions - pymatch_predictions * pymatch_predictions / float(num_shots)
-        ) / num_shots
-        pymatch_stddev = np.sqrt(pymatch_var)
-
-        result[cfg.test.meas_basis_test] = {
-            "num shots":
-                int(num_shots),
-            "logical errors":
-                int(num_errors),
-            "pymatch flips":
-                int(pymatch_predictions),
-            "logical error ratio (mean)":
-                float(num_errors / num_shots),
-            "logical error ratio (standard error)":
-                float(stddev / np.sqrt(num_shots)),
-            "logical error ratio (pymatch mean)":
-                float(pymatch_predictions / float(num_shots)),
-            "logical error ratio (pymatch standard error)":
-                float(pymatch_stddev / np.sqrt(num_shots)),
-            "pymatch latency (baseline µs/round)":
-                float(baseline_us_per_round),
-            "pymatch latency (after predecoder µs/round)":
-                float(predecoder_us_per_round),
-        }
     return result
 
 
@@ -880,10 +1018,11 @@ def count_logical_errors_with_errorbar(model, device, dist, cfg):
 def run_inference_and_decode_pre_decoder_memory(model, device, dist, cfg) -> dict:
     """
     Runs inference with the trained model, forms residual syndromes consistent with the DEM,
-    and computes the final logical error rate with PyMatching.
+    and computes the final logical error rate with the selected global decoder.
 
     Returns:
-        (num_logic_errors, num_samples, num_pymatch_errors, baseline_us_per_round, predecoder_us_per_round)
+        (num_logic_errors, num_samples, num_baseline_errors,
+         baseline_us_per_round, predecoder_us_per_round)
     """
 
     th_data = float(getattr(cfg.test, "th_data", 0.0))
@@ -1002,7 +1141,7 @@ def run_inference_and_decode_pre_decoder_memory(model, device, dist, cfg) -> dic
     dem_build_s = 0.0
     dem_decode_s = 0.0
 
-    # --- Build PyMatching from the circuit's exact detector ordering ---
+    # --- Build the DEM from the circuit's exact detector ordering ---
     # NOTE: With explicit noise models we use PAULI_CHANNEL_2, which requires
     # approximate_disjoint_errors=True when extracting a detector error model.
     t_dem_build_start = time.perf_counter()
@@ -1010,9 +1149,33 @@ def run_inference_and_decode_pre_decoder_memory(model, device, dist, cfg) -> dic
         decompose_errors=True, approximate_disjoint_errors=True
     )
     matcher = pymatching.Matching.from_detector_error_model(det_model)
+    global_decoder_kind = _get_global_decoder_kind(cfg)
+    global_decoder_label = _global_decoder_label(global_decoder_kind)
+    neural_decoder = None
+    if global_decoder_kind == "neural":
+        neural_checkpoint = resolve_neural_decoder_checkpoint(cfg)
+        if not neural_checkpoint:
+            raise ValueError(
+                "PREDECODER_GLOBAL_DECODER=neural requires "
+                "PREDECODER_NEURAL_DECODER_CHECKPOINT=/path/to/neural_decoder.pt"
+            )
+        neural_decoder = load_neural_logical_decoder(
+            neural_checkpoint,
+            input_size=det_model.num_detectors,
+            device=device,
+            threshold=_get_neural_decoder_threshold(cfg),
+            batch_size=_get_neural_decoder_batch_size(cfg),
+        )
+        if dist.rank == 0:
+            print(
+                f"[LER] Global decoder: neural "
+                f"(checkpoint={neural_checkpoint}, input_size={det_model.num_detectors})"
+            )
+    elif dist.rank == 0:
+        print("[LER] Global decoder: PyMatching")
     dem_build_s += time.perf_counter() - t_dem_build_start
 
-    # Baseline: PyMatching directly on Stim detectors (no pre-decoder), for reference
+    # Baseline: selected global decoder directly on Stim detectors (no pre-decoder), for reference
     # Each GPU computes baseline on its OWN samples
     stim_dets = np.asarray(test_dataset.dets_and_obs[:, :-circuit.num_observables], dtype=np.uint8)
     assert stim_dets.shape[1] == det_model.num_detectors, \
@@ -1031,11 +1194,13 @@ def run_inference_and_decode_pre_decoder_memory(model, device, dist, cfg) -> dic
             latency_baseline_rows.append(stim_dets[i].copy())
 
     t_dem_decode = time.perf_counter()
-    baseline_pred = matcher.decode_batch(stim_dets)
+    baseline_pred = _decode_with_global_decoder(
+        global_decoder_kind, matcher, neural_decoder, stim_dets
+    )
     dem_decode_s += time.perf_counter() - t_dem_decode
 
     baseline_pred = np.asarray(baseline_pred, dtype=np.uint8).reshape(-1, circuit.num_observables)
-    num_pymatch_errors = int((baseline_pred != stim_obs).sum())
+    num_baseline_errors = int((baseline_pred != stim_obs).sum())
 
     # --- DataLoader: NO DistributedSampler - each GPU processes ALL of its own samples ---
     test_loader_kwargs = dict(cfg.test.dataloader)
@@ -1413,7 +1578,9 @@ def run_inference_and_decode_pre_decoder_memory(model, device, dist, cfg) -> dic
             residual_syndrome_density_sum += float(residual_np.sum()) / residual_np.size
 
         t_dem_decode = time.perf_counter()
-        pred_obs = matcher.decode_batch(residual_np)  # (B,) or (B,1)
+        pred_obs = _decode_with_global_decoder(
+            global_decoder_kind, matcher, neural_decoder, residual_np
+        )  # (B,) or (B,1)
         t_dem_decode_end = time.perf_counter()
         batch_pred_time = t_dem_decode_end - t_dem_decode
         t_pm_time += batch_pred_time
@@ -1450,18 +1617,18 @@ def run_inference_and_decode_pre_decoder_memory(model, device, dist, cfg) -> dic
         print(f"  Model forward:         {t_model_time:.3f}s")
         print(f"  Residual construction: {t_postmodel_s:.3f}s")
         print(f"  GPU→CPU transfer:      {t_cpu_copy_s:.3f}s")
-        print(f"  PyMatching baseline:   {t_pm_baseline_s:.3f}s")
-        print(f"  PyMatching predecoder: {t_pm_time:.3f}s")
+        print(f"  {global_decoder_label} baseline:   {t_pm_baseline_s:.3f}s")
+        print(f"  {global_decoder_label} predecoder: {t_pm_time:.3f}s")
         print(f"  Post-decode logic:     {t_post_decode_s:.3f}s")
 
-        # Detailed PyMatching timing
-        print(f"\n[PyMatching Timing] Decoder Input Info:")
+        # Detailed decoder timing
+        print(f"\n[{global_decoder_label} Timing] Decoder Input Info:")
         print(f"  Detector array shape: {detector_shape} (batch_size, num_detectors)")
         print(f"  Total samples decoded: {total_samples}")
         print(f"  Number of batches: {num_batches} (across {dist.world_size} GPU(s))")
 
         avg_residual_density = residual_syndrome_density_sum / num_batches if num_batches > 0 else 0
-        print(f"\n[PyMatching Timing] Syndrome Density:")
+        print(f"\n[{global_decoder_label} Timing] Syndrome Density:")
         print(
             f"  Baseline (no pre-decoder): {baseline_syndrome_density:.6f} ({baseline_syndrome_density*100:.4f}% non-zero)"
         )
@@ -1476,7 +1643,8 @@ def run_inference_and_decode_pre_decoder_memory(model, device, dist, cfg) -> dic
         n_rounds = cfg.n_rounds
         total_rounds = total_samples * n_rounds
         print(
-            f"\n[PyMatching Timing] Decode Time (ONLY matcher.decode_batch, excludes GPU→CPU transfer):"
+            f"\n[{global_decoder_label} Timing] Decode Time "
+            "(ONLY decoder batch call, excludes GPU→CPU transfer):"
         )
         print(f"  n_rounds per sample: {n_rounds}")
         print(f"  Total rounds decoded: {total_rounds:,}")
@@ -1493,10 +1661,10 @@ def run_inference_and_decode_pre_decoder_memory(model, device, dist, cfg) -> dic
 
         baseline_above_floor = baseline_time_per_round - floor_us
         predecoder_above_floor = predecoder_time_per_round - floor_us
-        print(f"\n[PyMatching Timing] Breakdown (time above floor = density-dependent MWPM work):")
+        print(f"\n[{global_decoder_label} Timing] Breakdown:")
         print(f"  Baseline above floor:      {baseline_above_floor:.3f} µs/round")
         print(f"  Pre-decoder above floor:   {predecoder_above_floor:.3f} µs/round")
-        if baseline_above_floor > 0:
+        if global_decoder_kind == "pymatching" and baseline_above_floor > 0:
             mwpm_speedup = baseline_above_floor / predecoder_above_floor if predecoder_above_floor > 0 else float(
                 'inf'
             )
@@ -1514,7 +1682,7 @@ def run_inference_and_decode_pre_decoder_memory(model, device, dist, cfg) -> dic
             predecoder_per_round_min = predecoder_times_arr.min() / rounds_per_batch * 1e6
             predecoder_per_round_max = predecoder_times_arr.max() / rounds_per_batch * 1e6
             predecoder_per_round_std = predecoder_times_arr.std() / rounds_per_batch * 1e6
-            print(f"\n[PyMatching Timing] Per-Batch Variability (µs/round):")
+            print(f"\n[{global_decoder_label} Timing] Per-Batch Variability (µs/round):")
             print(
                 f"  Pre-decoder:  min={predecoder_per_round_min:.3f}, max={predecoder_per_round_max:.3f}, "
                 f"std={predecoder_per_round_std:.3f}, range={predecoder_per_round_max - predecoder_per_round_min:.3f}"
@@ -1523,21 +1691,23 @@ def run_inference_and_decode_pre_decoder_memory(model, device, dist, cfg) -> dic
     if dist.world_size > 1:
         t_log = torch.tensor(logical_errors, device=device, dtype=torch.long)
         t_n = torch.tensor(total_samples, device=device, dtype=torch.long)
-        t_pymatch = torch.tensor(num_pymatch_errors, device=device, dtype=torch.long)
+        t_baseline = torch.tensor(num_baseline_errors, device=device, dtype=torch.long)
         torch.distributed.all_reduce(t_log, op=torch.distributed.ReduceOp.SUM)
         torch.distributed.all_reduce(t_n, op=torch.distributed.ReduceOp.SUM)
-        torch.distributed.all_reduce(t_pymatch, op=torch.distributed.ReduceOp.SUM)
+        torch.distributed.all_reduce(t_baseline, op=torch.distributed.ReduceOp.SUM)
         logical_errors = int(t_log.item())
         total_samples = int(t_n.item())
-        num_pymatch_errors = int(t_pymatch.item())
+        num_baseline_errors = int(t_baseline.item())
 
-    # Latency: single-shot (batch_size=1, matcher.decode) on a small subset on rank 0 only,
+    # Latency: single-shot (batch_size=1) on a small subset on rank 0 only,
     # timed after the main loop for a clean CPU state.
     baseline_us_per_round = float("nan")
     predecoder_us_per_round = float("nan")
     if dist.rank == 0 and latency_baseline_rows is not None and latency_predecoder_rows is not None:
-        baseline_us_per_round, predecoder_us_per_round = _time_single_shot_latency_stim(
+        baseline_us_per_round, predecoder_us_per_round = _time_single_shot_latency_global_decoder(
+            decoder_kind=global_decoder_kind,
             matcher=matcher,
+            neural_decoder=neural_decoder,
             baseline_syndromes=np.asarray(latency_baseline_rows, dtype=np.uint8),
             residual_syndromes=np.asarray(latency_predecoder_rows, dtype=np.uint8),
             n_rounds=int(cfg.n_rounds),
@@ -1549,11 +1719,17 @@ def run_inference_and_decode_pre_decoder_memory(model, device, dist, cfg) -> dic
         n_r = max(int(cfg.n_rounds), 1)
         zero_syn = np.zeros((1, det_model.num_detectors), dtype=np.uint8)
         for _ in range(20):
-            _ = matcher.decode(zero_syn[0])
+            if global_decoder_kind == "pymatching":
+                _ = matcher.decode(zero_syn[0])
+            else:
+                _ = neural_decoder.decode_batch(zero_syn)
         _floor_times = []
         for _ in range(100):
             _ft0 = time.perf_counter()
-            _ = matcher.decode(zero_syn[0])
+            if global_decoder_kind == "pymatching":
+                _ = matcher.decode(zero_syn[0])
+            else:
+                _ = neural_decoder.decode_batch(zero_syn)
             _floor_times.append(time.perf_counter() - _ft0)
         floor_time_per_round = float(np.mean(_floor_times)) / n_r
 
@@ -1571,7 +1747,13 @@ def run_inference_and_decode_pre_decoder_memory(model, device, dist, cfg) -> dic
             f"(basis={basis}, batches={num_batches})"
         )
 
-    return logical_errors, total_samples, num_pymatch_errors, baseline_us_per_round, predecoder_us_per_round
+    return (
+        logical_errors,
+        total_samples,
+        num_baseline_errors,
+        baseline_us_per_round,
+        predecoder_us_per_round,
+    )
 
 
 @torch.inference_mode()

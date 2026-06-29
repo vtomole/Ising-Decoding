@@ -23,6 +23,8 @@ set -euo pipefail
 #   WORKFLOW=inference bash code/scripts/local_run.sh
 #   MODEL_ID=4 PREDECODER_SAFETENSORS_CHECKPOINT=models/hf/ising_decoder_surface_code_1_accurate_r13_v1.0.86_fp16.safetensors \
 #     WORKFLOW=inference bash code/scripts/local_run.sh
+#   PREDECODER_GLOBAL_DECODER=neural PREDECODER_NEURAL_DECODER_CHECKPOINT=outputs/neural_decoder.pt \
+#     WORKFLOW=inference bash code/scripts/local_run.sh
 #   GPUS=4 bash code/scripts/local_run.sh
 #   CUDA_VISIBLE_DEVICES=1 bash code/scripts/local_run.sh        # use only GPU 1
 #

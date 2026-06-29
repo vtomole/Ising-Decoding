@@ -11,7 +11,7 @@ This repo offers AI training recipes to build, customize and deploy scalable qua
 
 - A neural network consumes detector syndromes across space **and** time
 - It predicts corrections that reduce syndrome density / improve decoding
-- A standard decoder (PyMatching) produces the final logical decision
+- A standard decoder (PyMatching by default) produces the final logical decision
 
 The public release exposes a **single user-facing config** and a **single runner script**.
 
@@ -25,6 +25,7 @@ The public release exposes a **single user-facing config** and a **single runner
 - [Dependencies](#dependencies)
 - [Troubleshooting](#troubleshooting)
 - [Inference (pre-trained models)](#inference-pre-trained-models)
+  - [Global decoder selection](#global-decoder-selection)
 - [Model export and downstream tools](#model-export-and-downstream-tools)
   - [Converting .pt checkpoints to SafeTensors](#converting-pt-checkpoints-to-safetensors-optional-post-training)
   - [ONNX export and quantization](#onnx-export-and-quantization-optional-post-training)
@@ -258,6 +259,31 @@ If you are not training locally, you can run inference using pre-trained models.
 
 Inference output is written to `outputs/<EXPERIMENT_NAME>/` with a full log in
 `outputs/<EXPERIMENT_NAME>/run.log`.
+
+### Global decoder selection
+
+Inference uses PyMatching as the final global decoder by default. To make that explicit:
+
+```bash
+PREDECODER_GLOBAL_DECODER=pymatching WORKFLOW=inference bash code/scripts/local_run.sh
+```
+
+You can switch the final global decoder to a neural network checkpoint:
+
+```bash
+PREDECODER_GLOBAL_DECODER=neural \
+PREDECODER_NEURAL_DECODER_CHECKPOINT=outputs/neural_decoder.pt \
+WORKFLOW=inference bash code/scripts/local_run.sh
+```
+
+The neural global decoder is a feed-forward binary classifier inspired by the
+surface-code ML decoder in Bluvstein et al.: Linear, BatchNorm, GELU hidden
+blocks with a single logical-observable output. It consumes the same detector
+syndrome vector that PyMatching sees and predicts the logical frame bit. This is
+separate from the Hugging Face pre-decoder checkpoint; neural mode requires its
+own trained global-decoder checkpoint. Checkpoints may be plain PyTorch
+`state_dict` files or dicts with `model_state_dict`/`state_dict` plus optional
+metadata such as `input_size`, `hidden_sizes`, and `threshold`.
 
 ## Model export and downstream tools
 

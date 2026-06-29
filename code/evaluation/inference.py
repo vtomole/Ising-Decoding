@@ -19,8 +19,8 @@ Public inference should:
 - evaluate at cfg.distance / cfg.n_rounds (user-specified evaluation targets)
 - use cfg.data.noise_model (circuit-level 25p) when cfg.test.noise_model == "train"
 - report only:
-  - LER (PyMatching baseline vs after pre-decoder), X/Z/Avg
-  - PyMatching decode speedup (baseline latency / after-predecoder latency), averaged across X/Z
+  - LER (baseline global decoder vs after pre-decoder), X/Z/Avg
+  - global decoder speedup (baseline latency / after-predecoder latency), averaged across X/Z
 - NO plots and NO syndrome density reduction (SDR)
 """
 
@@ -49,14 +49,29 @@ def _extract_basis_metrics(basis_dict: Dict[str, Any]) -> Tuple[float, float, fl
     """
     Returns:
         ler_after: model+predecoder LER ("logical error ratio (mean)")
-        ler_baseline: pymatching baseline LER ("logical error ratio (pymatch mean)")
-        lat_after: pymatching latency after predecoder (µs/round)
-        lat_baseline: pymatching latency baseline (µs/round)
+        ler_baseline: baseline global decoder LER
+        lat_after: global decoder latency after predecoder (µs/round)
+        lat_baseline: global decoder latency baseline (µs/round)
     """
     ler_after = _safe_float(basis_dict.get("logical error ratio (mean)"))
-    ler_baseline = _safe_float(basis_dict.get("logical error ratio (pymatch mean)"))
-    lat_baseline = _safe_float(basis_dict.get("pymatch latency (baseline µs/round)"))
-    lat_after = _safe_float(basis_dict.get("pymatch latency (after predecoder µs/round)"))
+    ler_baseline = _safe_float(
+        basis_dict.get(
+            "logical error ratio (baseline mean)",
+            basis_dict.get("logical error ratio (pymatch mean)"),
+        )
+    )
+    lat_baseline = _safe_float(
+        basis_dict.get(
+            "decoder latency (baseline µs/round)",
+            basis_dict.get("pymatch latency (baseline µs/round)"),
+        )
+    )
+    lat_after = _safe_float(
+        basis_dict.get(
+            "decoder latency (after predecoder µs/round)",
+            basis_dict.get("pymatch latency (after predecoder µs/round)"),
+        )
+    )
     return ler_after, ler_baseline, lat_after, lat_baseline
 
 
@@ -169,6 +184,12 @@ def run_inference(model, device, dist, cfg) -> None:
 
     x_after, x_base, x_lat_after, x_lat_base = _extract_basis_metrics(result["X"])
     z_after, z_base, z_lat_after, z_lat_base = _extract_basis_metrics(result["Z"])
+    decoder_label = str(
+        result["X"].get(
+            "global decoder label",
+            result["X"].get("baseline decoder label", "PyMatching"),
+        )
+    )
 
     def _avg(a: float, b: float) -> float:
         vals = [v for v in (a, b) if v == v]  # NaN check
@@ -183,19 +204,23 @@ def run_inference(model, device, dist, cfg) -> None:
     avg_speedup = _avg(x_speedup, z_speedup)
 
     label_w = 40
+    x_latency_label = f"{decoder_label} latency - X basis (µs/round):"
+    z_latency_label = f"{decoder_label} latency - Z basis (µs/round):"
+    avg_latency_label = f"{decoder_label} latency - Avg (µs/round):"
+    speedup_label = f"{decoder_label} speedup (Avg X/Z):"
     print(f"  {'':<{label_w}}{'No pre-decoder':>15}  {'After pre-decoder':>17}")
     print(
-        f"  {'PyMatching latency - X basis (µs/round):':<{label_w}}{x_lat_base:>15.3f}  {x_lat_after:>17.3f}"
+        f"  {x_latency_label:<{label_w}}{x_lat_base:>15.3f}  {x_lat_after:>17.3f}"
     )
     print(
-        f"  {'PyMatching latency - Z basis (µs/round):':<{label_w}}{z_lat_base:>15.3f}  {z_lat_after:>17.3f}"
+        f"  {z_latency_label:<{label_w}}{z_lat_base:>15.3f}  {z_lat_after:>17.3f}"
     )
     print(
-        f"  {'PyMatching latency - Avg (µs/round):':<{label_w}}{avg_lat_base:>15.3f}  {avg_lat_after:>17.3f}"
+        f"  {avg_latency_label:<{label_w}}{avg_lat_base:>15.3f}  {avg_lat_after:>17.3f}"
     )
     print(f"  {'LER - X basis:':<{label_w}}{x_base:>15.6f}  {x_after:>17.6f}")
     print(f"  {'LER - Z basis:':<{label_w}}{z_base:>15.6f}  {z_after:>17.6f}")
     print(
         f"  {'LER - Avg:':<{label_w}}{_avg(x_base, z_base):>15.6f}  {_avg(x_after, z_after):>17.6f}"
     )
-    print(f"  {'PyMatching speedup (Avg X/Z):':<{label_w}}{avg_speedup:>15.3f}x")
+    print(f"  {speedup_label:<{label_w}}{avg_speedup:>15.3f}x")
