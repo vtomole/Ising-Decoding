@@ -24,6 +24,7 @@ Classes:
 import torch
 from torch.utils.data import Dataset
 
+from data.leakage import sample_measurements
 from qec.surface_code.memory_circuit import MemoryCircuit
 from qec.surface_code.data_mapping import (
     normalized_weight_mapping_Xstab_memory,
@@ -49,12 +50,14 @@ class QCDataPipePreDecoder_Memory_inference(Dataset):
         measure_basis='X',
         code_rotation='XV',  # <--- NEW: surface code orientation
         noise_model=None,  # Optional explicit NoiseModel (overrides p_error when provided)
+        leakage_probability=None,  # Optional two-qubit leakage transition probability
     ):
         self.distance = int(distance)
         self.n_rounds = max(int(n_rounds), 1)
         self.num_samples = int(num_samples)
         self.measure_basis = str(measure_basis).upper()
         self.code_rotation = code_rotation.upper() if code_rotation else 'XV'
+        self.leakage_probability = leakage_probability
 
         if error_mode != "circuit_level_surface_custom":
             raise ValueError("error_mode not supported")
@@ -119,7 +122,11 @@ class QCDataPipePreDecoder_Memory_inference(Dataset):
                 add_boundary_detectors=True,  # Required for proper PyMatching decoding
             )
             self.circ_X.set_error_rates()
-            meas_X = self.circ_X.stim_circuit.compile_sampler().sample(shots=self.nX)
+            meas_X = sample_measurements(
+                self.circ_X.stim_circuit,
+                shots=self.nX,
+                leakage_probability=self.leakage_probability,
+            )
             # drop final D*D data-qubit measurements and reshape to (shots, n_rounds, D^2-1)
             self.meas_X = (
                 torch.from_numpy(meas_X[..., :-(D * D)]
@@ -150,7 +157,11 @@ class QCDataPipePreDecoder_Memory_inference(Dataset):
                 add_boundary_detectors=True,  # Required for proper PyMatching decoding
             )
             self.circ_Z.set_error_rates()
-            meas_Z = self.circ_Z.stim_circuit.compile_sampler().sample(shots=self.nZ)
+            meas_Z = sample_measurements(
+                self.circ_Z.stim_circuit,
+                shots=self.nZ,
+                leakage_probability=self.leakage_probability,
+            )
             self.meas_Z = (
                 torch.from_numpy(meas_Z[..., :-(D * D)]
                                 ).to(torch.uint8).view(self.nZ, self.n_rounds,
@@ -178,7 +189,11 @@ class QCDataPipePreDecoder_Memory_inference(Dataset):
                 add_boundary_detectors=True,  # Required for proper PyMatching decoding
             )
             self.circ.set_error_rates()
-            meas = self.circ.stim_circuit.compile_sampler().sample(shots=self.num_samples)
+            meas = sample_measurements(
+                self.circ.stim_circuit,
+                shots=self.num_samples,
+                leakage_probability=self.leakage_probability,
+            )
             self.meas = (
                 torch.from_numpy(meas[..., :-(D * D)]
                                 ).to(torch.uint8).view(self.num_samples, self.n_rounds,

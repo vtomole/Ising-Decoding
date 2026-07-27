@@ -260,6 +260,26 @@ If you are not training locally, you can run inference using pre-trained models.
 Inference output is written to `outputs/<EXPERIMENT_NAME>/` with a full log in
 `outputs/<EXPERIMENT_NAME>/run.log`.
 
+### Experimental leakage sweep
+
+The standard public noise model is circuit-level Pauli noise. For an
+experimental leakage sweep, install the optional `leakysim` dependency and set
+`ISING_DECODING_LEAKAGE_ERROR` to a transition probability in `[0, 0.5]`. The
+simulator injects a leakage transition after each two-qubit Clifford gate.
+
+Set `ISING_DECODING_INFERENCE_METRICS_JSON` to save the X/Z/average LER and
+PyMatching latency schema consumed by the leakage plotting notebook:
+
+```bash
+python -m pip install leakysim
+ISING_DECODING_LEAKAGE_ERROR=1e-4 \
+ISING_DECODING_INFERENCE_METRICS_JSON=outputs/leakage_metrics.json \
+WORKFLOW=inference bash code/scripts/local_run.sh
+```
+
+The selected model checkpoint must be available locally; Git LFS pointers are
+not executable model weights.
+
 ### Global decoder selection
 
 Inference uses PyMatching as the final global decoder by default. To make that explicit:

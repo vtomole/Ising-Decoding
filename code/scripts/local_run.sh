@@ -61,7 +61,7 @@ FRESH_START="${FRESH_START:-0}"               # 1 => don't load checkpoint
 EXTRA_PARAMS="${EXTRA_PARAMS:-}"              # advanced hydra overrides (discouraged)
 TORCH_COMPILE="${TORCH_COMPILE:-}"            # 0/1 to disable/enable torch.compile
 TORCH_COMPILE_MODE="${TORCH_COMPILE_MODE:-}"  # optional: default | reduce-overhead | max-autotune
-MODEL_CHECKPOINT_FILE="${PREDECODER_MODEL_CHECKPOINT_FILE:-}"
+MODEL_CHECKPOINT_FILE="${ISING_DECODING_MODEL_CHECKPOINT_FILE:-${PREDECODER_MODEL_CHECKPOINT_FILE:-}}"
 
 DISTANCE="${DISTANCE:-}"
 N_ROUNDS="${N_ROUNDS:-}"
@@ -209,7 +209,7 @@ if [ -n "${TORCH_COMPILE_MODE}" ]; then
 fi
 
 # Prefer PREDECODER_PYTHON (cluster/container venv) when set
-PYTHON_BIN="${PYTHON_BIN:-${PREDECODER_PYTHON:-python}}"
+PYTHON_BIN="${PYTHON_BIN:-${ISING_DECODING_PYTHON:-${PREDECODER_PYTHON:-python}}}"
 if ! command -v "${PYTHON_BIN}" >/dev/null 2>&1; then
   if command -v python3 >/dev/null 2>&1; then
     PYTHON_BIN="python3"

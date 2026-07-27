@@ -18,9 +18,25 @@ Factory module for creating datapipes.
 Provides DatapipeFactory for instantiating data generators/datapipes from config.
 """
 
+import os
+
 import torch
 
 _STIM_INFERENCE_DATAPIPE_PRINTED = False
+
+
+def _leakage_probability_from_environment():
+    """Read the optional leakage sweep setting without expanding public config."""
+    raw = os.environ.get("ISING_DECODING_LEAKAGE_ERROR")
+    if raw is None:
+        # Preserve compatibility with existing experiment automation.
+        raw = os.environ.get("LEAKAGE_ERROR")
+    if raw in (None, ""):
+        return None
+    probability = float(raw)
+    if not 0.0 <= probability <= 0.5:
+        raise ValueError("Leakage probability must be between 0 and 0.5 inclusive.")
+    return probability
 
 
 class DatapipeFactory:
@@ -118,6 +134,7 @@ class DatapipeFactory:
                 measure_basis=cfg.test.meas_basis_test,
                 code_rotation=code_rotation,
                 noise_model=noise_model_obj,
+                leakage_probability=_leakage_probability_from_environment(),
             )
             return test_dataset
         else:

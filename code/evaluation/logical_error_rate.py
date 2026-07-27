@@ -103,6 +103,14 @@ def _global_decoder_label(kind: str) -> str:
     return {"pymatching": "PyMatching", "neural": "Neural network"}.get(kind, kind)
 
 
+def _leakage_inference_enabled() -> bool:
+    """Return whether this inference run uses the optional leakage sampler."""
+    raw = os.environ.get("ISING_DECODING_LEAKAGE_ERROR", os.environ.get("LEAKAGE_ERROR"))
+    if raw in (None, ""):
+        return False
+    return float(raw) > 0.0
+
+
 def _get_neural_decoder_threshold(cfg) -> float:
     raw = os.environ.get("PREDECODER_NEURAL_DECODER_THRESHOLD")
     if raw is None or not raw.strip():
@@ -1149,6 +1157,19 @@ def run_inference_and_decode_pre_decoder_memory(model, device, dist, cfg) -> dic
         decompose_errors=True, approximate_disjoint_errors=True
     )
     matcher = pymatching.Matching.from_detector_error_model(det_model)
+    if _leakage_inference_enabled():
+        # Leakage is sampled outside Stim's Pauli detector-error model.  A
+        # zero-weight boundary fallback keeps every resulting syndrome
+        # decodable, while existing model-derived boundary edges are retained.
+        for detector in range(det_model.num_detectors):
+            matcher.add_boundary_edge(
+                detector,
+                weight=0.0,
+                error_probability=0.5,
+                merge_strategy="keep-original",
+            )
+        if dist.rank == 0:
+            print("[LER] Enabled boundary fallback for leakage-generated detector events.")
     global_decoder_kind = _get_global_decoder_kind(cfg)
     global_decoder_label = _global_decoder_label(global_decoder_kind)
     neural_decoder = None
