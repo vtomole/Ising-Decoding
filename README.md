@@ -128,6 +128,30 @@ pip install -r code/requirements_public_train-cu12.txt
 bash code/scripts/check_python_compat.sh
 ```
 
+### Install as a Python package
+
+For inference from a notebook or another Python project, install the public
+package directly from the desired branch. Git LFS must be installed first so
+the bundled pretrained weights are included in the install:
+
+```bash
+git lfs install
+python -m pip install "git+https://github.com/vtomole/Ising-Decoding.git@loss_decoder"
+```
+
+This provides the `ising-decoding` command and the Python helpers:
+
+```python
+from ising_decoding import model_path, public_config_dir
+
+fast_checkpoint = model_path("fast")
+```
+
+The package installs the public configuration and the Fast/Accurate model
+weights into the active Python environment. Run `ising-decoding --help` for
+Hydra options; the existing `code/scripts/local_run.sh` remains available for
+source-checkout workflows.
+
 Tip: To force CUDA-enabled PyTorch, set `TORCH_CUDA=cuXXX` (recommended `cu13x`) or
 `TORCH_WHL_INDEX=https://download.pytorch.org/whl/cuXXX` before running installs.
 

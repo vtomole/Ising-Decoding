@@ -15,6 +15,7 @@
 
 import hydra, sys, torch, os, json, numpy as np
 from omegaconf import DictConfig, OmegaConf
+from ising_decoding import public_config_dir
 from training.train import main as train_main
 from model.factory import ModelFactory
 from data.factory import DatapipeFactory
@@ -52,7 +53,11 @@ def _ensure_inference_io_channels(cfg):
             cfg.model.num_filters = filters
 
 
-@hydra.main(version_base="1.3", config_path="../../conf", config_name="config")
+@hydra.main(
+    version_base="1.3",
+    config_path=str(public_config_dir()),
+    config_name="config_public",
+)
 def run(cfg: DictConfig) -> None:
     # Early-access public release: validate public surface, then merge in hidden defaults.
     # NOTE: Validation is done BEFORE merging defaults so we can fail fast on injected fields.

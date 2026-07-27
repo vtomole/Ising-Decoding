@@ -1,0 +1,49 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "ising-decoding"
+version = "0.1.0"
+description = "AI-accelerated surface-code decoding"
+readme = "README.md"
+requires-python = ">=3.11"
+license = { text = "Apache-2.0" }
+authors = [{ name = "NVIDIA Corporation" }]
+dependencies = [
+    "beliefmatching",
+    "hydra-core",
+    "ldpc",
+    "leakysim>=0.5.0",
+    "matplotlib",
+    "numpy",
+    "omegaconf",
+    "pymatching",
+    "safetensors>=0.4.0",
+    "scipy",
+    "stim",
+    "torch",
+]
+
+[project.scripts]
+ising-decoding = "ising_decoding.cli:main"
+
+[tool.setuptools.packages.find]
+where = ["code"]
+include = [
+    "data*",
+    "evaluation*",
+    "export*",
+    "ising_decoding*",
+    "model*",
+    "qec*",
+    "training*",
+    "workflows*",
+]
+
+[tool.setuptools.data-files]
+"ising_decoding/conf" = ["conf/config_public.yaml"]
+"ising_decoding/models" = [
+    "models/Ising-Decoder-SurfaceCode-1-Fast.pt",
+    "models/Ising-Decoder-SurfaceCode-1-Accurate.pt",
+]

@@ -1085,7 +1085,10 @@ def run_inference_and_decode_pre_decoder_memory(model, device, dist, cfg) -> dic
             print(f"[LER] channels_last_3d not applied: {e}")
 
     _applied_compile = _is_compiled(model)
-    _compile_enabled = _get_env_bool("PREDECODER_TORCH_COMPILE", True)
+    _compile_enabled = _get_env_bool(
+        "ISING_DECODING_TORCH_COMPILE",
+        _get_env_bool("PREDECODER_TORCH_COMPILE", True),
+    )
     if not _will_export_onnx and _compile_enabled and not _applied_compile:
         try:
             model = torch.compile(model, mode="default")

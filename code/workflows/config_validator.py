@@ -103,7 +103,10 @@ def _base_hidden_defaults_dict() -> Dict[str, Any]:
     release does not ship internal/legacy config files. These values were copied
     from the historical `config_pre_decoder_memory_surface_model_1_d9.yaml`.
     """
-    base_output_dir = os.environ.get("PREDECODER_BASE_OUTPUT_DIR", "outputs")
+    base_output_dir = os.environ.get(
+        "ISING_DECODING_BASE_OUTPUT_DIR",
+        os.environ.get("PREDECODER_BASE_OUTPUT_DIR", "outputs"),
+    )
     output_root = f"{base_output_dir}/${{exp_tag}}"
     return {
         "exp_tag": "pre-decoder",
@@ -120,8 +123,14 @@ def _base_hidden_defaults_dict() -> Dict[str, Any]:
         "enable_matmul_tf32": True,
         "enable_cudnn_tf32": True,
         "enable_cudnn_benchmark": True,
-        "torch_compile": _get_env_bool("PREDECODER_TORCH_COMPILE", True),
-        "torch_compile_mode": os.environ.get("PREDECODER_TORCH_COMPILE_MODE", "default"),
+        "torch_compile": _get_env_bool(
+            "ISING_DECODING_TORCH_COMPILE",
+            _get_env_bool("PREDECODER_TORCH_COMPILE", True),
+        ),
+        "torch_compile_mode": os.environ.get(
+            "ISING_DECODING_TORCH_COMPILE_MODE",
+            os.environ.get("PREDECODER_TORCH_COMPILE_MODE", "default"),
+        ),
         "load_checkpoint": False,
         "code": "surface",
         "distance": 9,
