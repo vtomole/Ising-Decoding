@@ -6,7 +6,9 @@
 from __future__ import annotations
 
 from pathlib import Path
+import site
 import sysconfig
+import sys
 
 
 _MODEL_FILENAMES = {
@@ -20,15 +22,23 @@ def _source_root() -> Path:
     return Path(__file__).resolve().parents[2]
 
 
-def _installed_data_root() -> Path:
-    return Path(sysconfig.get_path("data")) / "ising_decoding"
+def _installed_data_roots() -> tuple[Path, ...]:
+    """Return data-file locations used by system, venv, and user pip installs."""
+    roots = [Path(sysconfig.get_path("data")) / "ising_decoding"]
+    user_site = Path(site.getusersitepackages())
+    # ``pip install --user`` places ``data-files`` under ~/.local, rather than
+    # under sysconfig's system-level data directory.
+    if len(user_site.parents) >= 3:
+        roots.append(user_site.parents[2] / "ising_decoding")
+    roots.append(Path(sys.prefix) / "ising_decoding")
+    return tuple(dict.fromkeys(roots))
 
 
 def _data_root() -> Path:
     """Prefer installed package data, with a source-checkout fallback."""
-    installed = _installed_data_root()
-    if (installed / "conf" / "config_public.yaml").is_file():
-        return installed
+    for installed in _installed_data_roots():
+        if (installed / "conf" / "config_public.yaml").is_file():
+            return installed
     return _source_root()
 
 
