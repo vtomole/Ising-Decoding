@@ -9,6 +9,7 @@ from qec.surface_code.data_mapping import (
     compute_stabX_to_data_index_map,
     compute_stabZ_to_data_index_map,
 )
+from data.loss_aware_teacher import _adjacency_masks
 
 
 def residual_detectors_and_frame(
@@ -18,11 +19,14 @@ def residual_detectors_and_frame(
     *,
     basis: str = "X",
     code_rotation: str = "XV",
+    train_x: torch.Tensor | None = None,
+    output_semantics: str = "residual",
 ) -> tuple[np.ndarray, np.ndarray]:
     """Build residual detector rows and the local logical-frame contribution.
 
-    ``prediction`` is the thresholded v2 output in the tutorial convention
-    ``[Z correction, X correction, residual X, residual Z]``.  Deltakit
+    ``prediction`` is either ``[Z correction, X correction, residual X,
+    residual Z]`` (``residual`` mode) or Chamberland-style timelike
+    measurement corrections (``timelike`` mode). Deltakit
     herald-detector bits stay untouched; only the ordinary MemoryCircuit
     detector positions are replaced by the predecoder residual syndrome.
     """
@@ -40,12 +44,32 @@ def residual_detectors_and_frame(
     rotation = code_rotation.upper()
     if basis not in {"X", "Z"}:
         raise ValueError("basis must be X or Z.")
+    if output_semantics not in {"residual", "timelike"}:
+        raise ValueError("output_semantics must be residual or timelike.")
 
     # Grid locations not occupied by a stabilizer are ignored by the maps.
     x_indices = torch.as_tensor(compute_stabX_to_data_index_map(distance, rotation), device=prediction.device)
     z_indices = torch.as_tensor(compute_stabZ_to_data_index_map(distance, rotation), device=prediction.device)
-    residual_x = prediction[:, 2].reshape(batch, rounds, distance * distance)[:, :, x_indices]
-    residual_z = prediction[:, 3].reshape(batch, rounds, distance * distance)[:, :, z_indices]
+    if output_semantics == "residual":
+        residual_x = prediction[:, 2].reshape(batch, rounds, distance * distance)[:, :, x_indices]
+        residual_z = prediction[:, 3].reshape(batch, rounds, distance * distance)[:, :, z_indices]
+    else:
+        if train_x is None or tuple(train_x.shape) != (batch, 5, rounds, distance, distance):
+            raise ValueError("timelike mode requires matching five-channel train_x.")
+        n_data = distance * distance
+        x_adj, z_adj = _adjacency_masks(distance, rotation)
+        z_data = prediction[:, 0].reshape(batch, rounds, n_data).to(torch.int16)
+        x_data = prediction[:, 1].reshape(batch, rounds, n_data).to(torch.int16)
+        induced_x = (z_data @ x_adj.T.to(prediction.device, torch.int16)).remainder(2).to(torch.uint8)
+        induced_z = (x_data @ z_adj.T.to(prediction.device, torch.int16)).remainder(2).to(torch.uint8)
+        timelike_x = prediction[:, 2].reshape(batch, rounds, n_data).to(torch.uint8)
+        timelike_z = prediction[:, 3].reshape(batch, rounds, n_data).to(torch.uint8)
+        previous_x = torch.cat([torch.zeros_like(timelike_x[:, :1]), timelike_x[:, :-1]], dim=1)
+        previous_z = torch.cat([torch.zeros_like(timelike_z[:, :1]), timelike_z[:, :-1]], dim=1)
+        raw_x = train_x[:, 0].reshape(batch, rounds, n_data).to(prediction.device, torch.uint8)
+        raw_z = train_x[:, 1].reshape(batch, rounds, n_data).to(prediction.device, torch.uint8)
+        residual_x = (raw_x ^ induced_x ^ timelike_x ^ previous_x)[:, :, x_indices]
+        residual_z = (raw_z ^ induced_z ^ timelike_z ^ previous_z)[:, :, z_indices]
 
     # This is the original MemoryCircuit detector order used by the existing
     # predecoder pipeline: one initial same-basis slice, then both stabilizer

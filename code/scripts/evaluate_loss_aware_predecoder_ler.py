@@ -29,6 +29,7 @@ def main() -> None:
     parser.add_argument("--max-shots", type=int, default=128)
     parser.add_argument("--basis", default="X")
     parser.add_argument("--code-rotation", default="XV")
+    parser.add_argument("--output-semantics", choices=("auto", "residual", "timelike"), default="auto")
     parser.add_argument(
         "--oracle-local-teacher",
         action="store_true",
@@ -46,6 +47,11 @@ def main() -> None:
         distance = int(shard["distance"])
         rounds = int(shard["n_rounds"])
         pauli_p = float(shard["pauli_error_probability"])
+        teacher_mode = str(shard["teacher_mode"]) if "teacher_mode" in shard else "heuristic"
+
+    output_semantics = args.output_semantics
+    if output_semantics == "auto":
+        output_semantics = "timelike" if teacher_mode == "circuit-frame" else "residual"
 
     device = torch.device(args.device)
     if args.oracle_local_teacher:
@@ -73,6 +79,8 @@ def main() -> None:
         layout.original_detector_indices,
         basis=args.basis,
         code_rotation=args.code_rotation,
+        train_x=train_x.to(prediction.device) if output_semantics == "timelike" else None,
+        output_semantics=output_semantics,
     )
     matcher = LossAwareMatching(
         distance=distance,
@@ -88,6 +96,7 @@ def main() -> None:
     print(f"shots: {count}")
     print(f"heralded erasures: {int(heralds.sum())}")
     print(f"predecoder source: {'local-teacher oracle' if args.oracle_local_teacher else 'v2 checkpoint'}")
+    print(f"output semantics: {output_semantics}")
     print(f"loss-aware MWPM LER: {logical_error_rate(baseline_prediction, observables):.6g}")
     print(f"v2 + loss-aware MWPM LER: {logical_error_rate(predecoded_prediction, observables):.6g}")
     print(f"logical-prediction disagreement: {np.any(baseline_prediction != predecoded_prediction, axis=1).mean():.6g}")
