@@ -72,10 +72,12 @@ def local_erasure_teacher_targets(train_x: torch.Tensor, *, code_rotation: str =
         presence: torch.Tensor,
         adjacency: torch.Tensor,
     ) -> torch.Tensor:
-        # (B, T, Q, N): checks adjacent to each data qubit and visible now.
-        required = adjacency[None, None] & presence[:, :, None]
-        required_count = required.sum(dim=-1)
-        fired_required = (syndrome[:, :, None] & required).sum(dim=-1)
+        # Count visible/firing adjacent checks with matrix multiplication.
+        # This deliberately avoids constructing a (B, T, Q, N) broadcasted
+        # tensor, which is prohibitively large for tutorial-scale shards.
+        adjacency_int = adjacency.T.to(dtype=torch.int16)
+        required_count = presence.to(torch.int16) @ adjacency_int
+        fired_required = (syndrome & presence).to(torch.int16) @ adjacency_int
         return flags & (required_count > 0) & (fired_required == required_count)
 
     # X checks diagnose Z errors; Z checks diagnose X errors.
