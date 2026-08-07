@@ -29,6 +29,11 @@ def main() -> None:
     parser.add_argument("--max-shots", type=int, default=128)
     parser.add_argument("--basis", default="X")
     parser.add_argument("--code-rotation", default="XV")
+    parser.add_argument(
+        "--oracle-local-teacher",
+        action="store_true",
+        help="Use stored local-teacher outputs instead of model predictions (adapter sanity check).",
+    )
     args = parser.parse_args()
 
     with np.load(args.dataset) as shard:
@@ -37,16 +42,20 @@ def main() -> None:
         detectors = shard["detectors"][:count].astype(np.uint8, copy=False)
         heralds = shard["heralded_erasures"][:count].astype(np.uint8, copy=False)
         observables = shard["observables"][:count].astype(np.uint8, copy=False)
+        teacher_y = torch.from_numpy(shard["local_teacher_y"][:count]).to(torch.uint8)
         distance = int(shard["distance"])
         rounds = int(shard["n_rounds"])
         pauli_p = float(shard["pauli_error_probability"])
 
     device = torch.device(args.device)
-    model = PreDecoderModelMemory_v2(make_config(distance, rounds)).to(device)
-    model.load_state_dict(torch.load(args.checkpoint, map_location=device))
-    model.eval()
-    with torch.no_grad():
-        prediction = (torch.sigmoid(model(train_x.to(device))) >= args.threshold).to(torch.uint8)
+    if args.oracle_local_teacher:
+        prediction = teacher_y
+    else:
+        model = PreDecoderModelMemory_v2(make_config(distance, rounds)).to(device)
+        model.load_state_dict(torch.load(args.checkpoint, map_location=device))
+        model.eval()
+        with torch.no_grad():
+            prediction = (torch.sigmoid(model(train_x.to(device))) >= args.threshold).to(torch.uint8)
 
     # This zero-leakage instance supplies the invariant locations of ordinary
     # detector bits in the Deltakit-instrumented detector record.
@@ -78,8 +87,10 @@ def main() -> None:
 
     print(f"shots: {count}")
     print(f"heralded erasures: {int(heralds.sum())}")
+    print(f"predecoder source: {'local-teacher oracle' if args.oracle_local_teacher else 'v2 checkpoint'}")
     print(f"loss-aware MWPM LER: {logical_error_rate(baseline_prediction, observables):.6g}")
     print(f"v2 + loss-aware MWPM LER: {logical_error_rate(predecoded_prediction, observables):.6g}")
+    print(f"logical-prediction disagreement: {np.any(baseline_prediction != predecoded_prediction, axis=1).mean():.6g}")
     print(f"cached flag patterns: {matcher.cached_pattern_count}")
 
 
