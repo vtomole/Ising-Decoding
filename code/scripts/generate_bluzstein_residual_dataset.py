@@ -26,7 +26,9 @@ def main():
         x = torch.from_numpy(d["train_x"][:, :4]).float(); flags = d["heralded_erasures"].astype(np.uint8)
         obs = d["observables"].astype(np.uint8); distance, rounds = int(d["distance"]), int(d["n_rounds"])
     device = torch.device(args.device); model = PreDecoderModelMemory_v1(config(distance, rounds)).to(device)
-    model.load_state_dict(torch.load(args.checkpoint, map_location=device)); model.eval()
+    # NVIDIA's public checkpoint predates PyTorch 2.6's weights_only default.
+    # It is a trusted state dictionary shipped with the Ising-Decoding project.
+    model.load_state_dict(torch.load(args.checkpoint, map_location=device, weights_only=False)); model.eval()
     residuals=[]; frames=[]
     with torch.no_grad():
         for start in range(0, len(x), args.batch_size):
