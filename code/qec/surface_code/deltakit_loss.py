@@ -127,7 +127,7 @@ class DeltakitHeraldedErasureSampler:
             raise ValueError("forced_leakage_events must contain (round, data_qubit) pairs in range.")
         self.forced_leakage_events = forced_events
 
-        instrumented_text, original_indices, herald_indices, herald_detector_indices = self._instrument(
+        instrumented_text, original_indices, herald_indices, herald_detector_indices, original_detector_indices = self._instrument(
             base.stim_circuit,
             self.data_qubits,
         )
@@ -135,6 +135,7 @@ class DeltakitHeraldedErasureSampler:
         self._original_indices = np.asarray(original_indices, dtype=np.intp)
         self._herald_indices = np.asarray(herald_indices, dtype=np.intp)
         self.herald_detector_indices = np.asarray(herald_detector_indices, dtype=np.intp)
+        self.original_detector_indices = np.asarray(original_detector_indices, dtype=np.intp)
         self._sampler = self.circuit.compile_sampler(seed=seed)
 
     def _instrument(self, circuit, data_qubits: Sequence[int]):
@@ -146,6 +147,7 @@ class DeltakitHeraldedErasureSampler:
         original_to_new: list[int] = []
         herald_indices: list[list[int]] = []
         herald_detector_indices: list[list[int]] = []
+        original_detector_indices: list[int] = []
         output: list[str] = []
         round_index = 0
         detector_count = 0
@@ -205,6 +207,7 @@ class DeltakitHeraldedErasureSampler:
                 round_index += 1
 
             if gate == "DETECTOR":
+                original_detector_indices.append(detector_count)
                 detector_count += 1
 
         if original_count != circuit.num_measurements:
@@ -213,7 +216,13 @@ class DeltakitHeraldedErasureSampler:
             raise RuntimeError(
                 f"Expected {self.n_rounds} stabilizer rounds but found {len(herald_indices)} MR rounds."
             )
-        return "\n".join(output), original_to_new, herald_indices, herald_detector_indices
+        return (
+            "\n".join(output),
+            original_to_new,
+            herald_indices,
+            herald_detector_indices,
+            original_detector_indices,
+        )
 
     def sample(self, shots: int) -> DeltakitBatch:
         """Sample original measurements and an LDU herald map for ``shots`` shots."""
