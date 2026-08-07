@@ -19,10 +19,12 @@ def chamberland_residual_and_frame(
         raise ValueError("Expected matching (B, 4, T, D, D) input and prediction tensors.")
     n = distance * distance
     x_adj, z_adj = _adjacency_masks(distance, code_rotation)
-    z_data = prediction[:, 0].reshape(b, rounds, n).to(torch.int16)
-    x_data = prediction[:, 1].reshape(b, rounds, n).to(torch.int16)
-    induced_x = (z_data @ x_adj.T.to(prediction.device, torch.int16)).remainder(2).to(torch.uint8)
-    induced_z = (x_data @ z_adj.T.to(prediction.device, torch.int16)).remainder(2).to(torch.uint8)
+    # CUDA does not implement matrix multiplication for int16. The sums are
+    # at most four, so float32 parity arithmetic is exact here.
+    z_data = prediction[:, 0].reshape(b, rounds, n).to(torch.float32)
+    x_data = prediction[:, 1].reshape(b, rounds, n).to(torch.float32)
+    induced_x = (z_data @ x_adj.T.to(prediction.device, torch.float32)).remainder(2).to(torch.uint8)
+    induced_z = (x_data @ z_adj.T.to(prediction.device, torch.float32)).remainder(2).to(torch.uint8)
     tx = prediction[:, 2].reshape(b, rounds, n).to(torch.uint8)
     tz = prediction[:, 3].reshape(b, rounds, n).to(torch.uint8)
     previous_x = torch.cat([torch.zeros_like(tx[:, :1]), tx[:, :-1]], dim=1)
