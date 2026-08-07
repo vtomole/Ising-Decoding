@@ -14,6 +14,7 @@ from pathlib import Path
 import numpy as np
 import torch
 
+from data.loss_aware_circuit_teacher import circuit_frame_teacher_targets
 from data.loss_aware_teacher import local_erasure_teacher_targets
 from qec.surface_code.deltakit_loss import (
     DeltakitHeraldedErasureSampler,
@@ -30,6 +31,7 @@ def main() -> None:
     parser.add_argument("--pauli-p", type=float, default=0.002)
     parser.add_argument("--erasure-p", type=float, default=0.01)
     parser.add_argument("--seed", type=int, default=1)
+    parser.add_argument("--teacher", choices=("heuristic", "circuit-frame"), default="heuristic")
     args = parser.parse_args()
 
     sampler = DeltakitHeraldedErasureSampler(
@@ -39,7 +41,7 @@ def main() -> None:
         leakage_probability=args.erasure_p,
         seed=args.seed,
     )
-    batch = sampler.sample_with_decoder_data(args.shots)
+    batch = sampler.sample_with_frames(args.shots) if args.teacher == "circuit-frame" else sampler.sample_with_decoder_data(args.shots)
     train_x = memory_measurements_to_v2_input(
         batch.features.measurements,
         batch.features.heralded_erasures,
@@ -48,9 +50,17 @@ def main() -> None:
         basis=sampler.basis,
         code_rotation=sampler.code_rotation,
     ).numpy()
-    teacher_y = local_erasure_teacher_targets(
-        torch.from_numpy(train_x), code_rotation=sampler.code_rotation
-    ).numpy()
+    if args.teacher == "circuit-frame":
+        teacher_y = circuit_frame_teacher_targets(
+            torch.from_numpy(train_x),
+            torch.from_numpy(batch.data_x_frames),
+            torch.from_numpy(batch.data_z_frames),
+            code_rotation=sampler.code_rotation,
+        ).numpy()
+    else:
+        teacher_y = local_erasure_teacher_targets(
+            torch.from_numpy(train_x), code_rotation=sampler.code_rotation
+        ).numpy()
 
     args.output.parent.mkdir(parents=True, exist_ok=True)
     np.savez_compressed(
@@ -66,6 +76,7 @@ def main() -> None:
         pauli_error_probability=np.asarray(args.pauli_p),
         erasure_probability=np.asarray(args.erasure_p),
         seed=np.asarray(args.seed),
+        teacher_mode=np.asarray(args.teacher),
     )
     print(f"wrote {args.output}")
     print(f"train_x shape: {train_x.shape}")
