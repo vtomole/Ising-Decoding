@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import argparse
 from pathlib import Path
+import time
 
 import numpy as np
 import torch
@@ -35,6 +36,7 @@ def main() -> None:
     parser.add_argument("--device", default="cpu")
     parser.add_argument("--threshold", type=float, default=0.5)
     parser.add_argument("--oracle-local-teacher", action="store_true")
+    parser.add_argument("--timing-repeats", type=int, default=20)
     args = parser.parse_args()
 
     if args.shots <= 0 or args.batch_size <= 0:
@@ -68,6 +70,11 @@ def main() -> None:
     )
     global_errors = 0
     predecoded_errors = 0
+    baseline_weight = 0
+    residual_weight = 0
+    model_seconds = 0.0
+    timing_detectors = None
+    timing_residual = None
     completed = 0
     while completed < args.shots:
         count = min(args.batch_size, args.shots - completed)
@@ -83,8 +90,14 @@ def main() -> None:
         if args.oracle_local_teacher:
             prediction = local_erasure_teacher_targets(train_x, code_rotation=sampler.code_rotation).to(torch.uint8)
         else:
+            if device.type == "cuda":
+                torch.cuda.synchronize(device)
+            start = time.perf_counter()
             with torch.no_grad():
                 prediction = (torch.sigmoid(model(train_x.to(device))) >= args.threshold).to(torch.uint8)
+            if device.type == "cuda":
+                torch.cuda.synchronize(device)
+            model_seconds += time.perf_counter() - start
         residual, frame = residual_detectors_and_frame(
             prediction,
             batch.detectors,
@@ -97,13 +110,37 @@ def main() -> None:
         predecoded_prediction ^= frame[:, None]
         global_errors += int(np.any(global_prediction != batch.observables, axis=1).sum())
         predecoded_errors += int(np.any(predecoded_prediction != batch.observables, axis=1).sum())
+        baseline_weight += int(batch.detectors[:, sampler.original_detector_indices].sum())
+        residual_weight += int(residual[:, sampler.original_detector_indices].sum())
+        timing_detectors = batch.detectors
+        timing_residual = residual
         completed += count
+
+    # Both rows use the exact same conditioned graph. This measures only the
+    # PyMatching stage, not per-shot herald-pattern grouping or graph building.
+    fixed_key = ((round_index, data_qubit),)
+    conditioned_matcher = matcher.matching_for_key(fixed_key)
+    conditioned_matcher.decode_batch(timing_detectors)
+    conditioned_matcher.decode_batch(timing_residual)
+    start = time.perf_counter()
+    for _ in range(args.timing_repeats):
+        conditioned_matcher.decode_batch(timing_detectors)
+    baseline_decode_us = (time.perf_counter() - start) * 1e6 / (args.timing_repeats * len(timing_detectors))
+    start = time.perf_counter()
+    for _ in range(args.timing_repeats):
+        conditioned_matcher.decode_batch(timing_residual)
+    residual_decode_us = (time.perf_counter() - start) * 1e6 / (args.timing_repeats * len(timing_residual))
 
     print(f"shots: {args.shots}")
     print(f"fixed herald: round={round_index}, row={row}, column={column}")
     print(f"predecoder source: {'local-teacher oracle' if args.oracle_local_teacher else 'v2 checkpoint'}")
     print(f"loss-aware MWPM LER: {global_errors / args.shots:.6g} ({global_errors}/{args.shots})")
     print(f"v2 + loss-aware MWPM LER: {predecoded_errors / args.shots:.6g} ({predecoded_errors}/{args.shots})")
+    ordinary_bits = args.shots * len(sampler.original_detector_indices)
+    print(f"ordinary detector density: {baseline_weight / ordinary_bits:.6g} -> {residual_weight / ordinary_bits:.6g}")
+    print(f"PyMatching decode: {baseline_decode_us:.3f} -> {residual_decode_us:.3f} us/shot")
+    if model is not None:
+        print(f"v2 inference: {model_seconds * 1e6 / args.shots:.3f} us/shot (batched)")
     print(f"cached flag patterns: {matcher.cached_pattern_count}")
 
 
