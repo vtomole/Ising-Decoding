@@ -1,0 +1,18 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: LicenseRef-NvidiaProprietary
+
+# Loss-aware variant of config_pre_decoder_memory_surface_model_1_d9.yaml.
+#
+# The fifth input channel is a *heralded loss map* with shape (B, T, D, D):
+# 1 where a data-qubit loss/erasure is flagged for that round and 0 elsewhere.
+# It must be produced by a loss-aware sampler.  The stock depolarizing-noise
+# generator only produces the original four channels and must not be used to
+# train this configuration.
+
+defaults:
+  - config_pre_decoder_memory_surface_model_1_d9
+  - _self_
+
+model:
+  version: predecoder_memory_v2
+  input_channels: 5

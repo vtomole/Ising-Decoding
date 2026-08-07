@@ -23,6 +23,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from model.predecoder import (
     PreDecoderModelMemory_v1,
+    PreDecoderModelMemory_v2,
     get_mock_config,
 )
 
@@ -36,6 +37,23 @@ class TestPreDecoderModelMemoryV1(unittest.TestCase):
         x = torch.randn(B, C, T, D, D)
         out = model(x)
         self.assertEqual(out.shape, (B, cfg.model.out_channels, T, D, D))
+
+
+class TestPreDecoderModelMemoryV2(unittest.TestCase):
+
+    def test_forward_shape_with_loss_channel(self):
+        cfg = get_mock_config()
+        cfg.model.input_channels = 5
+        model = PreDecoderModelMemory_v2(cfg)
+        B, T, D = 2, cfg.n_rounds, cfg.distance
+        x = torch.randn(B, 5, T, D, D)
+        out = model(x)
+        self.assertEqual(out.shape, (B, cfg.model.out_channels, T, D, D))
+
+    def test_requires_loss_channel(self):
+        cfg = get_mock_config()
+        with self.assertRaisesRegex(ValueError, "requires five input channels"):
+            PreDecoderModelMemory_v2(cfg)
 
 
 if __name__ == "__main__":

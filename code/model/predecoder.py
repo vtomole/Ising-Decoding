@@ -117,6 +117,34 @@ class PreDecoderModelMemory_v1(nn.Module):
         return self.net(x)  # x: (B, 4, T, D, D)
 
 
+class PreDecoderModelMemory_v2(PreDecoderModelMemory_v1):
+    """Loss-aware v1 pre-decoder with one additional local input channel.
+
+    The network architecture and four correction heads are unchanged from v1.
+    Its input has shape ``(B, 5, T, D, D)``: the first four channels retain
+    the v1 ``trainX`` convention and channel 4 is a loss-information map.
+    """
+
+    LOSS_CHANNEL = 4
+    INPUT_CHANNELS = 5
+
+    def __init__(self, cfg):
+        if cfg.model.input_channels != self.INPUT_CHANNELS:
+            raise ValueError(
+                "PreDecoderModelMemory_v2 requires five input channels: "
+                "the four v1 trainX channels plus a loss-information channel."
+            )
+        super().__init__(cfg)
+
+    def forward(self, x):
+        if x.ndim != 5 or x.shape[1] != self.INPUT_CHANNELS:
+            raise ValueError(
+                "PreDecoderModelMemory_v2 expects input with shape "
+                "(B, 5, T, D, D)."
+            )
+        return super().forward(x)
+
+
 # === Define a mock config using SimpleNamespace ===
 def get_mock_config():
     cfg = SimpleNamespace()
