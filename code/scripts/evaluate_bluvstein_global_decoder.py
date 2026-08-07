@@ -10,9 +10,9 @@ from scripts.train_bluvstein_global_decoder import BluvsteinResidualMLP, feature
 def main():
     p=argparse.ArgumentParser(); p.add_argument("dataset",type=Path); p.add_argument("checkpoint",type=Path); p.add_argument("--device",default="cpu"); args=p.parse_args()
     with np.load(args.dataset) as d:
-        x=torch.from_numpy(features(d)).float(); target=torch.from_numpy(d["target"]).float(); obs=d["observables"].astype(np.uint8); frame=d["local_frame"].astype(np.uint8)
+        x=torch.from_numpy(features(d)).float(); target=torch.from_numpy(d["target"]).float(); obs=d["observables"].astype(np.uint8); frame=d["local_frame"].astype(np.uint8); software_flip=d["software_flip"].astype(np.uint8) if "software_flip" in d else np.zeros(len(obs),dtype=np.uint8)
     device=torch.device(args.device); ckpt=torch.load(args.checkpoint,map_location=device,weights_only=False)
     model=BluvsteinResidualMLP(int(ckpt["input_dim"]),int(ckpt["output_dim"])).to(device); model.load_state_dict(ckpt["state_dict"]); model.eval()
     with torch.no_grad(): logits=model(x.to(device)).cpu(); bce=torch.nn.functional.binary_cross_entropy_with_logits(logits,target).item(); residual=(torch.sigmoid(logits)>=.5).numpy().astype(np.uint8)
-    final=residual ^ frame[:,None]; print(f"BCE: {bce:.6f}"); print(f"global residual accuracy: {(residual == target.numpy()).mean():.6f}"); print(f"final logical LER: {np.any(final != obs,axis=1).mean():.6g}")
+    final=residual ^ frame[:,None] ^ software_flip[:,None]; print(f"BCE: {bce:.6f}"); print(f"global residual accuracy: {(residual == target.numpy()).mean():.6f}"); print(f"final logical LER: {np.any(final != obs,axis=1).mean():.6g}")
 if __name__ == "__main__": main()

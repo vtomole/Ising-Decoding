@@ -21,10 +21,12 @@ def main():
     p = argparse.ArgumentParser()
     p.add_argument("dataset", type=Path); p.add_argument("checkpoint", type=Path)
     p.add_argument("--output", type=Path, required=True); p.add_argument("--device", default="cpu")
-    p.add_argument("--batch-size", type=int, default=256); args = p.parse_args()
+    p.add_argument("--batch-size", type=int, default=256)
+    p.add_argument("--balance-logical-labels", action="store_true"); p.add_argument("--seed", type=int, default=1)
+    args = p.parse_args()
     with np.load(args.dataset) as d:
         x = torch.from_numpy(d["train_x"][:, :4]).float(); flags = d["heralded_erasures"].astype(np.uint8)
-        obs = d["observables"].astype(np.uint8); distance, rounds = int(d["distance"]), int(d["n_rounds"])
+        obs = d["observables"].astype(np.uint8); measurements = d["measurements"].astype(np.uint8); distance, rounds = int(d["distance"]), int(d["n_rounds"])
     device = torch.device(args.device); model = PreDecoderModelMemory_v1(config(distance, rounds)).to(device)
     # NVIDIA's public checkpoint predates PyTorch 2.6's weights_only default.
     # It is a trusted state dictionary shipped with the Ising-Decoding project.
@@ -36,10 +38,20 @@ def main():
             r,f=chamberland_residual_and_frame(xb, out); residuals.append(r.cpu()); frames.append(f.cpu())
     residual=torch.cat(residuals).numpy().astype(np.uint8); frame=torch.cat(frames).numpy().astype(np.uint8)
     # Global target is the logical parity remaining after the local frame.
-    target=obs ^ frame[:, None]
+    # The final data-readout parity is an experimentally accessible global
+    # feature, as in Bluvstein's classifier. A logical software flip changes
+    # this parity but creates no detector events, balancing the binary task.
+    support = np.zeros(distance * distance, dtype=np.uint8); support[:distance] = 1
+    logical_readout = (measurements[:, -(distance * distance):] * support).sum(axis=1).astype(np.uint8) & 1
+    software_flip = np.zeros(len(obs), dtype=np.uint8)
+    if args.balance_logical_labels:
+        software_flip = np.random.default_rng(args.seed).integers(0, 2, len(obs), dtype=np.uint8)
+    target = obs ^ frame[:, None] ^ software_flip[:, None]
+    logical_readout ^= software_flip
     args.output.parent.mkdir(parents=True, exist_ok=True)
     np.savez_compressed(args.output, residual=residual, heralded_erasures=flags, local_frame=frame,
-                        target=target, observables=obs, distance=np.asarray(distance), n_rounds=np.asarray(rounds))
+                        target=target, observables=obs, logical_readout=logical_readout, software_flip=software_flip,
+                        distance=np.asarray(distance), n_rounds=np.asarray(rounds))
     print(f"wrote {args.output}")
     print(f"residual shape: {residual.shape}; global target shape: {target.shape}")
 
