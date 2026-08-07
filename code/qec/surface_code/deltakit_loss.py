@@ -54,6 +54,14 @@ class DeltakitDecoderBatch:
     observables: np.ndarray
 
 
+@dataclass(frozen=True)
+class DeltakitFrameBatch(DeltakitDecoderBatch):
+    """Decoder data plus the hidden data-qubit Pauli frame after each LDU."""
+
+    data_x_frames: np.ndarray
+    data_z_frames: np.ndarray
+
+
 class DeltakitHeraldedErasureSampler:
     """Sample a surface-code memory circuit with Deltakit LDU boundaries.
 
@@ -100,6 +108,7 @@ class DeltakitHeraldedErasureSampler:
         self.code_rotation = str(code_rotation).upper()
         self.pauli_error_probability = float(pauli_error_probability)
         self.leakage_probability = float(leakage_probability)
+        self._frame_seed = seed
 
         base = MemoryCircuit(
             distance=self.distance,
@@ -271,6 +280,54 @@ class DeltakitHeraldedErasureSampler:
             observables=observables.astype(np.uint8, copy=False),
         )
 
+    def sample_with_frames(self, shots: int) -> DeltakitFrameBatch:
+        """Sample Deltakit trajectories and retain data Pauli frames per round.
+
+        ``FlipSimulator`` propagates the same stochastic Deltakit circuit while
+        exposing its hidden X/Z frame.  This supplies circuit-level supervision
+        for the Chamberland-style spacelike and timelike target generator.
+        """
+        import deltakit_stim
+
+        simulator = deltakit_stim.FlipSimulator(
+            batch_size=int(shots), num_qubits=self.circuit.num_qubits, seed=self._frame_seed
+        )
+        x_frames: list[np.ndarray] = []
+        z_frames: list[np.ndarray] = []
+        for instruction in self.circuit.flattened():
+            simulator.do(instruction)
+            if instruction.name == "RL":
+                x, z, _, _, _ = simulator.to_numpy(
+                    transpose=True, output_xs=True, output_zs=True
+                )
+                x_frames.append(x[:, self.data_qubits])
+                z_frames.append(z[:, self.data_qubits])
+        if len(x_frames) != self.n_rounds:
+            raise RuntimeError("Failed to capture one Pauli-frame snapshot per LDU round.")
+        _, _, measurements, detectors, observables = simulator.to_numpy(
+            transpose=True,
+            output_measure_flips=True,
+            output_detector_flips=True,
+            output_observable_flips=True,
+        )
+        measurements = measurements[:, self._original_indices]
+        heralds = measurements  # overwritten below; keeps dtype handling local.
+        # Herald record indices refer to the complete measurement record.
+        _, _, all_measurements, _, _ = simulator.to_numpy(transpose=True, output_measure_flips=True)
+        heralds = all_measurements[:, self._herald_indices].reshape(
+            shots, self.n_rounds, self.distance, self.distance
+        )
+        return DeltakitFrameBatch(
+            features=DeltakitBatch(
+                measurements=measurements.astype(np.uint8, copy=False),
+                heralded_erasures=heralds.astype(np.uint8, copy=False),
+            ),
+            detectors=detectors.astype(np.uint8, copy=False),
+            observables=observables.astype(np.uint8, copy=False),
+            data_x_frames=np.stack(x_frames, axis=1).reshape(shots, self.n_rounds, self.distance, self.distance),
+            data_z_frames=np.stack(z_frames, axis=1).reshape(shots, self.n_rounds, self.distance, self.distance),
+        )
+
 
 def memory_measurements_to_v2_input(
     measurements: np.ndarray,
@@ -341,6 +398,7 @@ def memory_measurements_to_v2_input(
 __all__ = [
     "DeltakitBatch",
     "DeltakitDecoderBatch",
+    "DeltakitFrameBatch",
     "DeltakitHeraldedErasureSampler",
     "memory_measurements_to_v2_input",
 ]
