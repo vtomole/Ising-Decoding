@@ -42,14 +42,17 @@ def main():
     # feature, as in Bluvstein's classifier. A logical software flip changes
     # this parity but creates no detector events, balancing the binary task.
     support = np.zeros(distance * distance, dtype=np.uint8); support[:distance] = 1
-    logical_readout = (measurements[:, -(distance * distance):] * support).sum(axis=1).astype(np.uint8) & 1
+    raw_measurements = measurements.copy()
+    logical_readout = (raw_measurements[:, -(distance * distance):] * support).sum(axis=1).astype(np.uint8) & 1
     software_flip = np.zeros(len(obs), dtype=np.uint8)
     if args.balance_logical_labels:
         software_flip = np.random.default_rng(args.seed).integers(0, 2, len(obs), dtype=np.uint8)
+        logical_columns = np.flatnonzero(support) + raw_measurements.shape[1] - distance * distance
+        raw_measurements[:, logical_columns] ^= software_flip[:, None]
     target = obs ^ frame[:, None] ^ software_flip[:, None]
     logical_readout ^= software_flip
     args.output.parent.mkdir(parents=True, exist_ok=True)
-    np.savez_compressed(args.output, residual=residual, heralded_erasures=flags, local_frame=frame,
+    np.savez_compressed(args.output, residual=residual, heralded_erasures=flags, raw_measurements=raw_measurements, local_frame=frame,
                         target=target, observables=obs, logical_readout=logical_readout, software_flip=software_flip,
                         distance=np.asarray(distance), n_rounds=np.asarray(rounds))
     print(f"wrote {args.output}")

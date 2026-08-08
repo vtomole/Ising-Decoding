@@ -21,7 +21,8 @@ class BluvsteinResidualMLP(nn.Module):
 def features(shard):
     core = np.concatenate([shard["residual"], shard["heralded_erasures"][:, None]], axis=1).reshape(len(shard["target"]), -1)
     readout = shard["logical_readout"].reshape(-1, 1) if "logical_readout" in shard else np.zeros((len(core), 1), dtype=np.uint8)
-    return np.concatenate([core, readout], axis=1)
+    raw = shard["raw_measurements"] if "raw_measurements" in shard else np.empty((len(core), 0), dtype=np.uint8)
+    return np.concatenate([core, raw, readout], axis=1)
 
 
 def main():
